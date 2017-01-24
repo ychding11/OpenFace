@@ -44,3 +44,5 @@ exe/Recording/Debug/
 lib/3rdParty/dlib/Debug/
 lib/local/FaceAnalyser/Debug/
 lib/local/LandmarkDetector/Debug/
+*.db
+*.opendb
