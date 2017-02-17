@@ -2,7 +2,7 @@
 // Copyright (C) 2016, Carnegie Mellon University and University of Cambridge,
 // all rights reserved.
 //
-// THIS SOFTWARE IS PROVIDED “AS IS” FOR ACADEMIC USE ONLY AND ANY EXPRESS
+// THIS SOFTWARE IS PROVIDED “AS IS?FOR ACADEMIC USE ONLY AND ANY EXPRESS
 // OR IMPLIED WARRANTIES WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
 // THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
 // PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS
@@ -15,8 +15,8 @@
 // POSSIBILITY OF SUCH DAMAGE.
 //
 // Notwithstanding the license granted herein, Licensee acknowledges that certain components
-// of the Software may be covered by so-called “open source” software licenses (“Open Source
-// Components”), which means any software licenses approved as open source licenses by the
+// of the Software may be covered by so-called “open source?software licenses (“Open Source
+// Components?, which means any software licenses approved as open source licenses by the
 // Open Source Initiative or any substantially similar licenses, including without limitation any
 // license that, as a condition of distribution of the software licensed under such license,
 // requires that the distributor make the software available in source code format. Licensor shall
@@ -81,9 +81,13 @@
 #include <FaceAnalyser.h>
 #include <GazeEstimation.h>
 
-#ifndef CONFIG_DIR
-#define CONFIG_DIR "~"
-#endif
+// OSC related
+#include <OscOutboundPacketStream.h>
+#include <UdpSocket.h>
+
+#define OSC_BUFFER_SIZE (1024 * 512)
+#define OSC_ADDRESS "127.0.0.1"
+#define OSC_PORT 8338
 
 #define INFO_STREAM( stream ) \
 std::cout << stream << std::endl
@@ -239,15 +243,16 @@ void outputAllFeatures(std::ofstream* output_file, bool output_2D_landmarks, boo
 
 void post_process_output_file(FaceAnalysis::FaceAnalyser& face_analyser, string output_file, bool dynamic);
 
+// Output all of the information by OSC
+void outputAllFeaturesByOsc(osc::OutboundPacketStream &p, std::ofstream* output_file, bool output_2D_landmarks, bool output_3D_landmarks,
+	bool output_model_params, bool output_pose, bool output_AUs, bool output_gaze,
+	const LandmarkDetector::CLNF& face_model, int frame_count, double time_stamp, bool detection_success,
+	cv::Point3f gazeDirection0, cv::Point3f gazeDirection1, const cv::Vec6d& pose_estimate, double fx, double fy, double cx, double cy,
+	const FaceAnalysis::FaceAnalyser& face_analyser);
 
 int main (int argc, char **argv)
 {
-
 	vector<string> arguments = get_arguments(argc, argv);
-
-	// Search paths
-	boost::filesystem::path config_path = boost::filesystem::path(CONFIG_DIR);
-	boost::filesystem::path parent_path = boost::filesystem::path(arguments[0]).parent_path();
 
 	// Some initial parameters that can be overriden from command line	
 	vector<string> input_files, depth_directories, output_files, tracked_videos_output;
@@ -329,25 +334,23 @@ int main (int argc, char **argv)
 		output_2D_landmarks, output_3D_landmarks, output_model_params, output_pose, output_AUs, output_gaze, arguments);
 	
 	// Used for image masking
+
 	string tri_loc;
-	boost::filesystem::path tri_loc_path = boost::filesystem::path("model/tris_68_full.txt");
-	if (boost::filesystem::exists(tri_loc_path))
+	if(boost::filesystem::exists(path("model/tris_68_full.txt")))
 	{
-		tri_loc = tri_loc_path.string();
-	}
-	else if (boost::filesystem::exists(parent_path/tri_loc_path))
-	{
-		tri_loc = (parent_path/tri_loc_path).string();
-	}
-	else if (boost::filesystem::exists(config_path/tri_loc_path))
-	{
-		tri_loc = (config_path/tri_loc_path).string();
+		tri_loc = "model/tris_68_full.txt";
 	}
 	else
 	{
-		cout << "Can't find triangulation files, exiting" << endl;
-		return 1;
-	}
+		path loc = path(arguments[0]).parent_path() / "model/tris_68_full.txt";
+		tri_loc = loc.string();
+
+		if(!exists(loc))
+		{
+			cout << "Can't find triangulation files, exiting" << endl;
+			return 1;
+		}
+	}	
 
 	// Will warp to scaled mean shape
 	cv::Mat_<double> similarity_normalised_shape = face_model.pdm.mean_shape * sim_scale;
@@ -371,28 +374,33 @@ int main (int argc, char **argv)
 		au_loc_local = "AU_predictors/AU_all_static.txt";
 	}
 
-	boost::filesystem::path au_loc_path = boost::filesystem::path(au_loc_local);
-	if (boost::filesystem::exists(au_loc_path))
+	if(boost::filesystem::exists(path(au_loc_local)))
 	{
-		au_loc = au_loc_path.string();
-	}
-	else if (boost::filesystem::exists(parent_path/au_loc_path))
-	{
-		au_loc = (parent_path/au_loc_path).string();
-	}
-	else if (boost::filesystem::exists(config_path/au_loc_path))
-	{
-		au_loc = (config_path/au_loc_path).string();
+		au_loc = au_loc_local;
 	}
 	else
 	{
-		cout << "Can't find AU prediction files, exiting" << endl;
-		return 1;
-	}
+		path loc = path(arguments[0]).parent_path() / au_loc_local;
+
+		if(exists(loc))
+		{
+			au_loc = loc.string();
+		}
+		else
+		{
+			cout << "Can't find AU prediction files, exiting" << endl;
+			return 1;
+		}
+	}	
 
 	// Creating a  face analyser that will be used for AU extraction
 	FaceAnalysis::FaceAnalyser face_analyser(vector<cv::Vec3d>(), 0.7, 112, 112, au_loc, tri_loc);
 		
+	// Prepare Osc Transmitter
+	UdpTransmitSocket transmitSocket(IpEndpointName(OSC_ADDRESS, OSC_PORT));
+	char buffer[OSC_BUFFER_SIZE];
+	osc::OutboundPacketStream p(buffer, OSC_BUFFER_SIZE);
+
 	while(!done) // this is not a for loop as we might also be reading from a webcam
 	{
 		
@@ -404,7 +412,7 @@ int main (int argc, char **argv)
 		int total_frames = -1;
 		int reported_completion = 0;
 
-		double fps_vid_in = -1.0;
+		double fps_vid_in = 1.0;
 
 		if(video_input)
 		{
@@ -433,6 +441,15 @@ int main (int argc, char **argv)
 					INFO_STREAM("FPS of the video file cannot be determined, assuming 30");
 					fps_vid_in = 30;
 				}
+			}
+			else
+			{
+				INFO_STREAM("Attempting to capture from device: " << d);
+				video_capture = cv::VideoCapture(d);
+
+				// Read a first frame often empty in camera
+				cv::Mat captured_image;
+				video_capture >> captured_image;
 			}
 
 			if (!video_capture.isOpened())
@@ -651,12 +668,19 @@ int main (int argc, char **argv)
 
 			// Visualising the tracker
 			visualise_tracking(captured_image, face_model, det_parameters, gazeDirection0, gazeDirection1, frame_count, fx, fy, cx, cy);
-
+			
+#if 0
 			// Output the landmarks, pose, gaze, parameters and AUs
 			outputAllFeatures(&output_file, output_2D_landmarks, output_3D_landmarks, output_model_params, output_pose, output_AUs, output_gaze,
 				face_model, frame_count, time_stamp, detection_success, gazeDirection0, gazeDirection1,
 				pose_estimate, fx, fy, cx, cy, face_analyser);
-
+#else
+			// Output the landmarks, pose, gaze, parameters and AUs
+			outputAllFeaturesByOsc(p, &output_file, output_2D_landmarks, output_3D_landmarks, output_model_params, output_pose, output_AUs, output_gaze,
+				face_model, frame_count, time_stamp, detection_success, gazeDirection0, gazeDirection1,
+				pose_estimate, fx, fy, cx, cy, face_analyser);
+			transmitSocket.Send(p.Data(), p.Size());//send by OSC
+#endif
 			// output the tracked video
 			if(!tracked_videos_output.empty())
 			{		
@@ -933,7 +957,6 @@ void outputAllFeatures(std::ofstream* output_file, bool output_2D_landmarks, boo
 	cv::Point3f gazeDirection0, cv::Point3f gazeDirection1, const cv::Vec6d& pose_estimate, double fx, double fy, double cx, double cy,
 	const FaceAnalysis::FaceAnalyser& face_analyser)
 {
-
 	double confidence = 0.5 * (1 - face_model.detection_certainty);
 
 	*output_file << frame_count + 1 << ", " << time_stamp << ", " << confidence << ", " << detection_success;
@@ -948,7 +971,7 @@ void outputAllFeatures(std::ofstream* output_file, bool output_2D_landmarks, boo
 	// Output the estimated head pose
 	if (output_pose)
 	{
-		if(face_model.tracking_initialised)
+		if (face_model.tracking_initialised)
 		{
 			*output_file << ", " << pose_estimate[0] << ", " << pose_estimate[1] << ", " << pose_estimate[2]
 				<< ", " << pose_estimate[3] << ", " << pose_estimate[4] << ", " << pose_estimate[5];
@@ -964,7 +987,7 @@ void outputAllFeatures(std::ofstream* output_file, bool output_2D_landmarks, boo
 	{
 		for (int i = 0; i < face_model.pdm.NumberOfPoints() * 2; ++i)
 		{
-			if(face_model.tracking_initialised)
+			if (face_model.tracking_initialised)
 			{
 				*output_file << ", " << face_model.detected_landmarks.at<double>(i);
 			}
@@ -1007,7 +1030,7 @@ void outputAllFeatures(std::ofstream* output_file, bool output_2D_landmarks, boo
 		}
 		for (int i = 0; i < face_model.pdm.NumberOfModes(); ++i)
 		{
-			if(face_model.tracking_initialised)
+			if (face_model.tracking_initialised)
 			{
 				*output_file << ", " << face_model.params_local.at<double>(i, 0);
 			}
@@ -1076,7 +1099,6 @@ void outputAllFeatures(std::ofstream* output_file, bool output_2D_landmarks, boo
 	}
 	*output_file << endl;
 }
-
 
 void get_output_feature_params(vector<string> &output_similarity_aligned, vector<string> &output_hog_aligned_files, double &similarity_scale,
 	int &similarity_size, bool &grayscale, bool& verbose, bool& dynamic,
@@ -1302,3 +1324,184 @@ void output_HOG_frame(std::ofstream* hog_file, bool good_frame, const cv::Mat_<d
 		}
 	}
 }
+
+// Output all of the information by OSC
+void outputAllFeaturesByOsc(osc::OutboundPacketStream &p, std::ofstream* output_file, bool output_2D_landmarks, bool output_3D_landmarks,
+	bool output_model_params, bool output_pose, bool output_AUs, bool output_gaze,
+	const LandmarkDetector::CLNF& face_model, int frame_count, double time_stamp, bool detection_success,
+	cv::Point3f gazeDirection0, cv::Point3f gazeDirection1, const cv::Vec6d& pose_estimate, double fx, double fy, double cx, double cy,
+	const FaceAnalysis::FaceAnalyser& face_analyser)
+{
+	//char buffer[OSC_BUFFER_SIZE];
+	//osc::OutboundPacketStream p(buffer, OSC_BUFFER_SIZE);
+	p.Clear();
+	p << osc::BeginBundleImmediate;
+	//p << osc::BeginMessage("/test1") << true << 23 << (float)3.1415 << "hello" << osc::EndMessage;
+	//p << osc::BeginMessage("/test2") << true << 24 << (float)10.8 << "world" << osc::EndMessage;
+
+	double confidence = 0.5 * (1 - face_model.detection_certainty);
+
+	*output_file << frame_count + 1 << ", " << time_stamp << ", " << confidence << ", " << detection_success;
+
+	p << osc::BeginMessage("/frame") << frame_count + 1 << osc::EndMessage;
+	p << osc::BeginMessage("/timestamp") << time_stamp << osc::EndMessage;
+	p << osc::BeginMessage("/confidence") << (float)confidence <<osc::EndMessage;
+	p << osc::BeginMessage("/success") << (int)detection_success << osc::EndMessage;
+
+	// Output the estimated gaze
+	if (output_gaze)
+	{
+		*output_file << ", " << gazeDirection0.x << ", " << gazeDirection0.y << ", " << gazeDirection0.z
+			<< ", " << gazeDirection1.x << ", " << gazeDirection1.y << ", " << gazeDirection1.z;
+		p << osc::BeginMessage("/eyegaze/left") << (float)gazeDirection0.x << (float)gazeDirection0.y << (float)gazeDirection0.z << osc::EndMessage;
+		p << osc::BeginMessage("/eyegaze/right") << (float)gazeDirection1.x << (float)gazeDirection1.y << (float)gazeDirection1.z << osc::EndMessage;
+	}
+
+	// Output the estimated head pose
+	if (output_pose)
+	{
+		if (face_model.tracking_initialised)
+		{
+			*output_file << ", " << pose_estimate[0] << ", " << pose_estimate[1] << ", " << pose_estimate[2]
+				<< ", " << pose_estimate[3] << ", " << pose_estimate[4] << ", " << pose_estimate[5];
+			p << osc::BeginMessage("/pose/translate") << (float)pose_estimate[0] << (float)pose_estimate[1] << (float)pose_estimate[2] << osc::EndMessage;
+			p << osc::BeginMessage("/pose/rotate") << (float)pose_estimate[3] << (float)pose_estimate[4] << (float)pose_estimate[5] << osc::EndMessage;
+		}
+		else
+		{
+			*output_file << ", 0, 0, 0, 0, 0, 0";
+			p << osc::BeginMessage("/pose/translate") << (float)0.0 << (float)0.0 << (float)0.0 << osc::EndMessage;
+			p << osc::BeginMessage("/pose/rotate") << (float)0.0 << (float)0.0 << (float)0.0 << osc::EndMessage;
+		}
+	}
+
+	// Output the detected 2D facial landmarks
+	if (output_2D_landmarks)
+	{
+		for (int i = 0; i < face_model.pdm.NumberOfPoints() * 2; ++i)
+		{
+			if (face_model.tracking_initialised)
+			{
+				*output_file << ", " << face_model.detected_landmarks.at<double>(i);
+			}
+			else
+			{
+				*output_file << ", 0";
+			}
+		}
+	}
+
+	// Output the detected 3D facial landmarks
+	if (output_3D_landmarks)
+	{
+		cv::Mat_<double> shape_3D = face_model.GetShape(fx, fy, cx, cy);
+		for (int i = 0; i < face_model.pdm.NumberOfPoints() * 3; ++i)
+		{
+			if (face_model.tracking_initialised)
+			{
+				*output_file << ", " << shape_3D.at<double>(i);
+			}
+			else
+			{
+				*output_file << ", 0";
+			}
+		}
+	}
+
+	if (output_model_params)
+	{
+		for (int i = 0; i < 6; ++i)
+		{
+			if (face_model.tracking_initialised)
+			{
+				*output_file << ", " << face_model.params_global[i];
+			}
+			else
+			{
+				*output_file << ", 0";
+			}
+		}
+		for (int i = 0; i < face_model.pdm.NumberOfModes(); ++i)
+		{
+			if (face_model.tracking_initialised)
+			{
+				*output_file << ", " << face_model.params_local.at<double>(i, 0);
+			}
+			else
+			{
+				*output_file << ", 0";
+			}
+		}
+	}
+
+
+
+	if (output_AUs)
+	{
+		auto aus_reg = face_analyser.GetCurrentAUsReg();
+
+		vector<string> au_reg_names = face_analyser.GetAURegNames();
+		std::sort(au_reg_names.begin(), au_reg_names.end());
+
+		//p << osc::BeginMessage("/fau");
+		// write out ar the correct index
+		for (string au_name : au_reg_names)
+		{
+			for (auto au_reg : aus_reg)
+			{
+				if (au_name.compare(au_reg.first) == 0)
+				{
+					*output_file << ", " << au_reg.second;
+					char msg[32];
+					sprintf(msg,"/intensity/%s",au_name.c_str());
+					p << osc::BeginMessage(msg) << au_reg.second << osc::EndMessage;
+					//std::cout << au_name << "  " << au_reg.second << std::endl;
+					break;
+				}
+			}
+		}
+
+		if (aus_reg.size() == 0)
+		{
+			for (size_t p = 0; p < face_analyser.GetAURegNames().size(); ++p)
+			{
+				*output_file << ", 0";
+			}
+		}
+
+		auto aus_class = face_analyser.GetCurrentAUsClass();
+
+		vector<string> au_class_names = face_analyser.GetAUClassNames();
+		std::sort(au_class_names.begin(), au_class_names.end());
+
+		// write out ar the correct index
+		for (string au_name : au_class_names)
+		{
+			for (auto au_class : aus_class)
+			{
+				if (au_name.compare(au_class.first) == 0)
+				{
+					*output_file << ", " << au_class.second;
+					//std::cout << au_name << "  " << au_class.second << std::endl;
+					char msg[32];
+					sprintf(msg, "/presense/%s", au_name.c_str());
+					p << osc::BeginMessage(msg) << au_class.second << osc::EndMessage;
+					break;
+				}
+			}
+		}
+
+		if (aus_class.size() == 0)
+		{
+			for (size_t p = 0; p < face_analyser.GetAUClassNames().size(); ++p)
+			{
+				*output_file << ", 0";
+			}
+		}
+	}
+	p << osc::BeginMessage("/frameEnd") << (int)0 << osc::EndMessage;
+	p<< osc::EndBundle; // OSC Message end.
+	*output_file << endl;
+}
+
+
